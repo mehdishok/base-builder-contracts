@@ -2,54 +2,54 @@
 pragma solidity ^0.8.28;
 
 /// @title StakingPool
-/// @notice Simple ETH staking with reward rate
+/// @notice Simple staking pool with reward calculation and minimum stake
 contract StakingPool {
     address public immutable owner;
     uint256 public rewardRate;
     uint256 public totalStaked;
-    uint256 public constant SCALE = 1e18;
+    uint256 public constant MIN_STAKE = 0.001 ether;
 
-    struct StakeInfo {
-        uint256 amount;
-        uint256 rewardDebt;
-        uint256 lastUpdate;
-    }
+    mapping(address => uint256) public stakedBalance;
+    mapping(address => uint256) public rewardDebt;
+    mapping(address => uint256) public lastUpdate;
 
-    mapping(address => StakeInfo) public stakes;
-
-    error ZeroAmount();
-    error InsufficientStake();
-    error TransferFailed();
     error NotOwner();
+    error BelowMinStake();
+    error InsufficientBalance();
+    error TransferFailed();
 
     event Staked(address indexed user, uint256 amount);
     event Unstaked(address indexed user, uint256 amount);
-    event RewardClaimed(address indexed user, uint256 reward);
-    event RewardRateUpdated(uint256 newRate);
+    event RewardClaimed(address indexed user, uint256 amount);
 
     constructor(uint256 _rewardRate) {
         owner = msg.sender;
         rewardRate = _rewardRate;
     }
 
+    function _updateReward(address user) internal {
+        if (stakedBalance[user] > 0) {
+            uint256 pending = (block.timestamp - lastUpdate[user]) * stakedBalance[user] * rewardRate / 1e18;
+            rewardDebt[user] += pending;
+        }
+        lastUpdate[user] = block.timestamp;
+    }
+
     function stake() external payable {
-        if (msg.value == 0) revert ZeroAmount();
+        if (msg.value < MIN_STAKE) revert BelowMinStake();
 
         _updateReward(msg.sender);
-
-        stakes[msg.sender].amount += msg.value;
+        stakedBalance[msg.sender] += msg.value;
         totalStaked += msg.value;
 
         emit Staked(msg.sender, msg.value);
     }
 
     function unstake(uint256 amount) external {
-        if (amount == 0) revert ZeroAmount();
-        if (stakes[msg.sender].amount < amount) revert InsufficientStake();
+        if (stakedBalance[msg.sender] < amount) revert InsufficientBalance();
 
         _updateReward(msg.sender);
-
-        stakes[msg.sender].amount -= amount;
+        stakedBalance[msg.sender] -= amount;
         totalStaked -= amount;
 
         (bool success, ) = payable(msg.sender).call{value: amount}("");
@@ -60,11 +60,10 @@ contract StakingPool {
 
     function claimReward() external {
         _updateReward(msg.sender);
+        uint256 reward = rewardDebt[msg.sender];
+        if (reward == 0) return;
 
-        uint256 reward = stakes[msg.sender].rewardDebt;
-        if (reward == 0) revert ZeroAmount();
-
-        stakes[msg.sender].rewardDebt = 0;
+        rewardDebt[msg.sender] = 0;
 
         (bool success, ) = payable(msg.sender).call{value: reward}("");
         if (!success) revert TransferFailed();
@@ -72,32 +71,15 @@ contract StakingPool {
         emit RewardClaimed(msg.sender, reward);
     }
 
-    function _updateReward(address user) internal {
-        StakeInfo storage userStake = stakes[user];
-        if (userStake.amount > 0) {
-            uint256 timeDiff = block.timestamp - userStake.lastUpdate;
-            uint256 pending = (userStake.amount * rewardRate * timeDiff) / SCALE;
-            userStake.rewardDebt += pending;
+    function getPendingReward(address user) external view returns (uint256) {
+        uint256 pending = rewardDebt[user];
+        if (stakedBalance[user] > 0) {
+            pending += (block.timestamp - lastUpdate[user]) * stakedBalance[user] * rewardRate / 1e18;
         }
-        userStake.lastUpdate = block.timestamp;
+        return pending;
     }
 
-    function pendingReward(address user) external view returns (uint256) {
-        StakeInfo memory userStake = stakes[user];
-        if (userStake.amount == 0) return userStake.rewardDebt;
-
-        uint256 timeDiff = block.timestamp - userStake.lastUpdate;
-        uint256 pending = (userStake.amount * rewardRate * timeDiff) / SCALE;
-        return userStake.rewardDebt + pending;
-    }
-
-    function setRewardRate(uint256 newRate) external {
-        if (msg.sender != owner) revert NotOwner();
-        rewardRate = newRate;
-        emit RewardRateUpdated(newRate);
-    }
-
-    function getStake(address user) external view returns (uint256) {
-        return stakes[user].amount;
+    function getStakedBalance(address user) external view returns (uint256) {
+        return stakedBalance[user];
     }
 }
